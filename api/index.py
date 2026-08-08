@@ -9,9 +9,12 @@ from collections import Counter
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 
-from dotenv import load_dotenv
+# Ensure project root is in sys.path BEFORE any local imports for Vercel
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-# Load environment variables from .env file immediately upon startup
+from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -38,9 +41,10 @@ class PureBM25Encoder:
         self.total_docs = 1
         self.avgdl = 1.0
 
-        if os.path.exists(filepath):
+        full_path = os.path.join(BASE_DIR, filepath)
+        if os.path.exists(full_path):
             try:
-                with open(filepath, "r") as f:
+                with open(full_path, "r") as f:
                     data = json.load(f)
                     self.k1 = data.get("k1", 1.2)
                     self.b = data.get("b", 0.75)
@@ -159,7 +163,12 @@ class SmartKeyManager:
 
     def get_client(self) -> tuple[Groq, str]:
         if not self.keys:
-            raise HTTPException(status_code=500, detail="No Groq API keys configured.")
+            # Fallback mock or check for standard GROQ_API_KEY
+            fallback_key = os.environ.get("GROQ_API_KEY")
+            if fallback_key:
+                return Groq(api_key=fallback_key), fallback_key
+            raise HTTPException(status_code=500, detail="No Groq API keys configured in environment variables.")
+        
         for _ in range(len(self.keys)):
             idx = redis.incr("bns:key_idx") % len(self.keys)
             key = self.keys[idx]
@@ -309,7 +318,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 
 if os.path.exists(PUBLIC_DIR):
@@ -325,6 +333,13 @@ def serve_frontend():
         return FileResponse(index_path)
     return {"status": "ok", "message": "Backend active. index.html not found in public/"}
 
+@app.get("/favicon.ico", include_in_schema=False)
+def serve_favicon():
+    favicon_path = os.path.join(PUBLIC_DIR, "favicon.ico")
+    if os.path.exists(favicon_path):
+        return FileResponse(favicon_path)
+    return FileResponse(os.path.join(PUBLIC_DIR, "index.html"))
+
 @app.get("/api/auth/token")
 def get_auto_ip_token(req: Request):
     client_ip = req.headers.get("x-forwarded-for", req.client.host if req.client else "127.0.0.1").split(",")[0].strip()
@@ -332,7 +347,7 @@ def get_auto_ip_token(req: Request):
     return {"token": token, "client_ip": client_ip}
 
 @app.post("/api/query/stream")
-async def handle_query_stream(
+def handle_query_stream(
     payload: QueryRequest,
     req: Request,
     user_id: str = Depends(verify_jwt_token)
@@ -357,6 +372,7 @@ async def handle_query_stream(
 
         # 3. Safe Pinecone Search
         matches = []
+        pc = None
         if PINECONE_API_KEY:
             try:
                 pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -384,7 +400,7 @@ async def handle_query_stream(
                 candidate_docs.append({"id": doc_id, "text": meta["text"]})
 
         contexts = []
-        if candidate_docs:
+        if candidate_docs and pc:
             try:
                 rerank_resp = pc.inference.rerank(
                     model="bge-reranker-v2-m3",
@@ -397,6 +413,8 @@ async def handle_query_stream(
             except Exception as rerank_err:
                 print(f"⚠️ Reranker failed: {rerank_err}. Using vector ranking.")
                 contexts = [doc["text"] for doc in candidate_docs[:3]]
+        elif candidate_docs:
+            contexts = [doc["text"] for doc in candidate_docs[:3]]
 
         context_str = "\n\n".join([f"Source {i+1}:\n{c}" for i, c in enumerate(contexts)]) if contexts else "No context retrieved."
 
