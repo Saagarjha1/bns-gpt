@@ -31,7 +31,6 @@ except ImportError:
 # ENVIRONMENT & CONFIGURATION
 # ==========================================
 
-# Multi-key Groq API support (GROQ_API_KEY or GROQ_API_KEY_1..5)
 GROQ_KEYS = [
     os.getenv("GROQ_API_KEY"),
     os.getenv("GROQ_API_KEY_1"),
@@ -50,9 +49,11 @@ UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 
 if SENTRY_AVAILABLE and SENTRY_DSN:
-    sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0)
+    try:
+        sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0)
+    except Exception:
+        pass
 
-# Main FastAPI App Exported for Vercel Serverless
 app = FastAPI(title="Enterprise BNS Legal AI API", version="1.0.0")
 
 app.add_middleware(
@@ -139,11 +140,9 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
 
 # ==========================================
 # API ENDPOINTS
-# Note: Vercel mounts api/index.py under /api.
-# Internal routes must NOT repeat the /api prefix.
 # ==========================================
 
-@app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {
         "status": "healthy",
@@ -152,14 +151,14 @@ def health_check():
     }
 
 
-@app.get("/auth/token")
+@app.get("/api/auth/token")
 def get_auth_token(request: Request):
     client_ip = get_client_ip(request)
     token = create_jwt_token(client_ip)
     return {"token": token, "ip": client_ip}
 
 
-@app.post("/query/stream")
+@app.post("/api/query/stream")
 async def query_stream(
     req: QueryRequest,
     request: Request,
@@ -185,16 +184,18 @@ async def query_stream(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         yield f"data: {json.dumps({'status': f'Searching database... | {remaining}/{MAX_QUERIES_PER_DAY} queries remaining'})}\n\n"
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.01)
 
         candidate_docs = []
 
+        # Safely query Pinecone without crashing the stream
         if index and PINECONE_API_KEY:
             try:
-                query_res = index.query(
-                    vector=[0.0] * 1536,
-                    top_k=5,
-                    include_metadata=True
+                # Wrap blocking Pinecone query in an executor to avoid blocking asyncio loop
+                loop = asyncio.get_event_loop()
+                query_res = await loop.run_in_executor(
+                    None, 
+                    lambda: index.query(vector=[0.0] * 1536, top_k=5, include_metadata=True)
                 )
                 for match in query_res.get("matches", []):
                     if "metadata" in match and "text" in match["metadata"]:
@@ -202,23 +203,7 @@ async def query_stream(
             except Exception as vector_err:
                 print(f"⚠️ Pinecone query error: {vector_err}")
 
-        contexts = []
-        if candidate_docs:
-            try:
-                if pc and hasattr(pc, "inference") and hasattr(pc.inference, "rerank"):
-                    rerank_resp = pc.inference.rerank(
-                        model="bge-reranker-v2-m3",
-                        query=user_query,
-                        documents=candidate_docs,
-                        top_n=3,
-                        return_documents=True
-                    )
-                    contexts = [item.document["text"] for item in rerank_resp.data]
-                else:
-                    contexts = [doc["text"] for doc in candidate_docs[:3]]
-            except Exception as rerank_err:
-                print(f"⚠️ Reranker error: {rerank_err}")
-                contexts = [doc["text"] for doc in candidate_docs[:3]]
+        contexts = [doc["text"] for doc in candidate_docs[:3]] if candidate_docs else []
 
         yield f"data: {json.dumps({'status': 'Generating legal analysis...'})}\n\n"
 
@@ -227,11 +212,10 @@ async def query_stream(
         if not selected_groq_key:
             fallback_text = (
                 f"### Query: {user_query}\n\n"
-                "**Error:** No valid Groq API key configured in environment variables.\n\n"
-                "**Relevant Provisions Found:**\n" + 
-                ("\n".join([f"- {c}" for c in contexts]) if contexts else "No documents returned.")
+                "**Configuration Note:** No `GROQ_API_KEY` set in Vercel Environment Variables.\n\n"
+                "Please add `GROQ_API_KEY` to Vercel Project Settings -> Environment Variables and redeploy."
             )
-            yield f"data: {json.dumps({'text': fallback_text})}\n\n"
+            yield f"data: {json.dumps({'chunk': fallback_text})}\n\n"
             yield "data: [DONE]\n\n"
             return
 
@@ -266,7 +250,8 @@ async def query_stream(
                     json=payload
                 ) as response:
                     if response.status_code != 200:
-                        yield f"data: {json.dumps({'error': f'Groq API Error ({response.status_code})'})}\n\n"
+                        err_body = await response.aread()
+                        yield f"data: {json.dumps({'chunk': f'Groq API Error ({response.status_code}): {err_body.decode()}'})}\n\n"
                         yield "data: [DONE]\n\n"
                         return
 
@@ -288,7 +273,7 @@ async def query_stream(
 
         except Exception as groq_err:
             print(f"⚠️ Groq exception: {groq_err}")
-            yield f"data: {json.dumps({'error': f'Streaming exception: {str(groq_err)}'})}\n\n"
+            yield f"data: {json.dumps({'chunk': f'Streaming exception: {str(groq_err)}'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -301,7 +286,6 @@ async def query_stream(
         }
     )
 
-# Catch-all route to handle unmapped paths gracefully with JSON instead of HTML 404
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all(request: Request, path_name: str):
     return JSONResponse(
@@ -309,7 +293,6 @@ async def catch_all(request: Request, path_name: str):
         content={
             "error": "Route not found",
             "requested_path": path_name,
-            "full_url": str(request.url),
-            "message": "Endpoint not matched inside api/index.py."
+            "full_url": str(request.url)
         }
     )
