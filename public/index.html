@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enterprise BNS Legal AI</title>
+  <style>
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-color: #38bdf8;
+      --accent-hover: #0284c7;
+      --border-color: #334155;
+      --error-color: #f87171;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 800px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      margin-top: 20px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .status-bar {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .status-badge {
+      color: var(--accent-color);
+      font-weight: 600;
+    }
+
+    .search-box {
+      display: flex;
+      gap: 10px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 14px 18px;
+      border-radius: 8px;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+      border-color: var(--accent-color);
+    }
+
+    button {
+      background-color: var(--accent-color);
+      color: #0f172a;
+      border: none;
+      padding: 0 24px;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    button:hover {
+      background-color: var(--accent-hover);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .output-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 24px;
+      min-height: 200px;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      font-size: 0.98rem;
+      overflow-y: auto;
+      max-height: 500px;
+    }
+
+    .placeholder-text {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .error-text {
+      color: var(--error-color);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <h1>⚖️ Enterprise BNS Legal AI</h1>
+      <p>Bharatiya Nyaya Sanhita (BNS), 2023 Statutory Query Engine</p>
+    </header>
+
+    <div class="status-bar">
+      <span>Status: <span id="status-badge" class="status-badge">Ready</span></span>
+      <span id="quota-badge">20/20 queries available</span>
+    </div>
+
+    <form class="search-box" id="query-form">
+      <input 
+        type="text" 
+        id="query-input" 
+        placeholder="Ask a legal query e.g. What is the penalty for extortion under BNS?" 
+        required 
+        autocomplete="off"
+      />
+      <button type="submit" id="submit-btn">Search</button>
+    </form>
+
+    <div class="output-card" id="output-box">
+      <span class="placeholder-text">Submit a query above to retrieve and stream legal provisions...</span>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('query-form');
+    const input = document.getElementById('query-input');
+    const submitBtn = document.getElementById('submit-btn');
+    const outputBox = document.getElementById('output-box');
+    const statusBadge = document.getElementById('status-badge');
+    const quotaBadge = document.getElementById('quota-badge');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const query = input.value.trim();
+      if (!query) return;
+
+      // UI state setup
+      input.disabled = true;
+      submitBtn.disabled = true;
+      statusBadge.textContent = 'Connecting...';
+      outputBox.innerHTML = '';
+
+      try {
+        const response = await fetch('/api/query/stream', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query: query })
+        });
+
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.detail || 'Server request failed');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // Keep partial line in buffer
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('data: ')) {
+              const payload = trimmed.substring(6);
+              
+              if (payload === '[DONE]') {
+                statusBadge.textContent = 'Completed';
+                break;
+              }
+
+              try {
+                const data = JSON.parse(payload);
+
+                if (data.status) {
+                  statusBadge.textContent = data.status;
+                  if (data.status.includes('queries remaining')) {
+                    quotaBadge.textContent = data.status.split('|').pop().trim();
+                  }
+                }
+
+                if (data.chunk) {
+                  outputBox.textContent += data.chunk;
+                  outputBox.scrollTop = outputBox.scrollHeight;
+                }
+
+                if (data.text) {
+                  outputBox.textContent = data.text;
+                }
+
+                if (data.error) {
+                  outputBox.innerHTML = `<span class="error-text">Error: ${data.error}</span>`;
+                }
+              } catch (parseErr) {
+                console.warn('JSON parse error on SSE line:', parseErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        statusBadge.textContent = 'Error';
+        outputBox.innerHTML = `<span class="error-text">${err.message}</span>`;
+      } finally {
+        input.disabled = false;
+        submitBtn.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+</body>
+</html>

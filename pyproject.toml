@@ -1,0 +1,19 @@
+[project]
+name = "bns-legal-rag"
+version = "3.0.0"
+description = "Enterprise Hybrid RAG System for Bharatiya Nyaya Sanhita (BNS)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110.0",
+    "pinecone>=3.0.0",
+    "pinecone-text>=0.8.0",
+    "groq>=0.4.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
+    "pyjwt[crypto]>=2.8.0",
+    "sentry-sdk[fastapi]>=2.0.0",
+    "sentence-transformers>=2.5.0"
+]
+
+[tool.vercel]
+entrypoint = "api/index.py:app"
