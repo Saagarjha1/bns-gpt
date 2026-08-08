@@ -9,6 +9,3 @@ pyjwt>=2.8.0
 python-dotenv>=1.0.0
 sentry-sdk>=1.40.0
 upstash-redis>=0.15.0
-huggingface-hub>=0.20.0
-langchain>=0.1.0
-langchain-community>=0.0.20
