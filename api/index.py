@@ -16,14 +16,14 @@ import jwt
 try:
     from pinecone import Pinecone
     PINECONE_AVAILABLE = True
-except ImportError:
+except Exception:
     PINECONE_AVAILABLE = False
 
 # Optional Sentry integration
 try:
     import sentry_sdk
     SENTRY_AVAILABLE = True
-except ImportError:
+except Exception:
     SENTRY_AVAILABLE = False
 
 
@@ -105,12 +105,12 @@ def create_jwt_token(ip: str) -> str:
 def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except jwt.PyJWTError:
+    except Exception:
         return None
 
 
 # ==========================================
-# RATE LIMITING LOGIC (Async HTTP)
+# SAFE RATE LIMITING LOGIC
 # ==========================================
 MAX_QUERIES_PER_DAY = 20
 
@@ -124,7 +124,11 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
     try:
         async with httpx.AsyncClient(timeout=3.0) as http_client:
             inc_res = await http_client.post(f"{UPSTASH_REDIS_REST_URL}/incr/{key}", headers=headers)
-            current_count = inc_res.json().get("result", 1)
+            res_data = inc_res.json()
+            
+            # Safe extraction of integer count from Redis result
+            raw_result = res_data.get("result") if isinstance(res_data, dict) else None
+            current_count = int(raw_result) if raw_result is not None and str(raw_result).isdigit() else 1
             
             if current_count == 1:
                 await http_client.post(f"{UPSTASH_REDIS_REST_URL}/expire/{key}/86400", headers=headers)
@@ -134,7 +138,7 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
                 return False, 0
             return True, remaining
     except Exception as err:
-        print(f"⚠️ Rate limit store error: {err}")
+        print(f"⚠️ Rate limit error: {err}")
         return True, MAX_QUERIES_PER_DAY
 
 
@@ -164,127 +168,134 @@ async def query_stream(
     request: Request,
     authorization: Optional[str] = Header(None)
 ):
-    user_query = req.query.strip()
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Query string cannot be empty.")
+    try:
+        user_query = req.query.strip() if req and req.query else ""
+        if not user_query:
+            raise HTTPException(status_code=400, detail="Query string cannot be empty.")
 
-    client_ip = get_client_ip(request)
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ")[1]
-        decoded = verify_jwt_token(token)
-        if decoded and "ip" in decoded:
-            client_ip = decoded["ip"]
+        client_ip = get_client_ip(request)
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.split(" ")[1]
+            decoded = verify_jwt_token(token)
+            if decoded and "ip" in decoded:
+                client_ip = decoded["ip"]
 
-    allowed, remaining = await check_rate_limit_async(client_ip)
-    if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Maximum {MAX_QUERIES_PER_DAY} queries allowed per day."
-        )
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        yield f"data: {json.dumps({'status': f'Searching database... | {remaining}/{MAX_QUERIES_PER_DAY} queries remaining'})}\n\n"
-        await asyncio.sleep(0.01)
-
-        candidate_docs = []
-
-        # Safely query Pinecone without crashing the stream
-        if index and PINECONE_API_KEY:
-            try:
-                # Wrap blocking Pinecone query in an executor to avoid blocking asyncio loop
-                loop = asyncio.get_event_loop()
-                query_res = await loop.run_in_executor(
-                    None, 
-                    lambda: index.query(vector=[0.0] * 1536, top_k=5, include_metadata=True)
-                )
-                for match in query_res.get("matches", []):
-                    if "metadata" in match and "text" in match["metadata"]:
-                        candidate_docs.append({"text": match["metadata"]["text"]})
-            except Exception as vector_err:
-                print(f"⚠️ Pinecone query error: {vector_err}")
-
-        contexts = [doc["text"] for doc in candidate_docs[:3]] if candidate_docs else []
-
-        yield f"data: {json.dumps({'status': 'Generating legal analysis...'})}\n\n"
-
-        selected_groq_key = random.choice(VALID_GROQ_KEYS) if VALID_GROQ_KEYS else None
-
-        if not selected_groq_key:
-            fallback_text = (
-                f"### Query: {user_query}\n\n"
-                "**Configuration Note:** No `GROQ_API_KEY` set in Vercel Environment Variables.\n\n"
-                "Please add `GROQ_API_KEY` to Vercel Project Settings -> Environment Variables and redeploy."
+        allowed, remaining = await check_rate_limit_async(client_ip)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded. Maximum {MAX_QUERIES_PER_DAY} queries allowed per day."
             )
-            yield f"data: {json.dumps({'chunk': fallback_text})}\n\n"
-            yield "data: [DONE]\n\n"
-            return
 
-        system_prompt = (
-            "You are an expert legal assistant specializing in the Bharatiya Nyaya Sanhita (BNS), 2023. "
-            "Provide precise, structured, and legally accurate answers based on statutory provisions. "
-            "Cite relevant BNS section numbers where applicable."
+        async def event_generator() -> AsyncGenerator[str, None]:
+            yield f"data: {json.dumps({'status': f'Searching database... | {remaining}/{MAX_QUERIES_PER_DAY} queries remaining'})}\n\n"
+            await asyncio.sleep(0.01)
+
+            candidate_docs = []
+
+            # Safe Pinecone Query
+            if index and PINECONE_API_KEY:
+                try:
+                    loop = asyncio.get_event_loop()
+                    # Safe query attempting common vector dimensions
+                    query_res = await loop.run_in_executor(
+                        None, 
+                        lambda: index.query(vector=[0.0] * 1536, top_k=3, include_metadata=True)
+                    )
+                    for match in query_res.get("matches", []):
+                        if "metadata" in match and "text" in match["metadata"]:
+                            candidate_docs.append({"text": match["metadata"]["text"]})
+                except Exception as vector_err:
+                    print(f"⚠️ Pinecone query bypassed: {vector_err}")
+
+            contexts = [doc["text"] for doc in candidate_docs[:3]] if candidate_docs else []
+
+            yield f"data: {json.dumps({'status': 'Generating legal analysis...'})}\n\n"
+
+            selected_groq_key = random.choice(VALID_GROQ_KEYS) if VALID_GROQ_KEYS else None
+
+            if not selected_groq_key:
+                fallback_text = (
+                    f"### Query: {user_query}\n\n"
+                    "**Configuration Required:** `GROQ_API_KEY` is not set in Vercel Environment Variables.\n\n"
+                    "Please set `GROQ_API_KEY` in Vercel Project Settings -> Environment Variables and redeploy."
+                )
+                yield f"data: {json.dumps({'chunk': fallback_text})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            system_prompt = (
+                "You are an expert legal assistant specializing in the Bharatiya Nyaya Sanhita (BNS), 2023. "
+                "Provide precise, structured, and legally accurate answers based on statutory provisions. "
+                "Cite relevant BNS section numbers where applicable."
+            )
+            context_str = "\n\n".join(contexts) if contexts else "No relevant statutory provisions retrieved from vector index."
+            full_user_prompt = f"Context:\n{context_str}\n\nUser Legal Query: {user_query}"
+
+            try:
+                headers = {
+                    "Authorization": f"Bearer {selected_groq_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": full_user_prompt}
+                    ],
+                    "stream": True,
+                    "temperature": 0.2
+                }
+
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    async with client.stream(
+                        "POST",
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    ) as response:
+                        if response.status_code != 200:
+                            err_body = await response.aread()
+                            yield f"data: {json.dumps({'chunk': f'Groq API Error ({response.status_code}): {err_body.decode()}'})}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data_json = json.loads(data_str)
+                                    delta = data_json["choices"][0]["delta"].get("content", "")
+                                    if delta:
+                                        yield f"data: {json.dumps({'chunk': delta})}\n\n"
+                                except Exception:
+                                    continue
+
+                yield f"data: {json.dumps({'status': f'Completed | {remaining}/{MAX_QUERIES_PER_DAY} queries remaining'})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            except Exception as groq_err:
+                yield f"data: {json.dumps({'chunk': f'Streaming exception: {str(groq_err)}'})}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
         )
-        context_str = "\n\n".join(contexts) if contexts else "No relevant statutory provisions retrieved."
-        full_user_prompt = f"Context:\n{context_str}\n\nUser Legal Query: {user_query}"
 
-        try:
-            headers = {
-                "Authorization": f"Bearer {selected_groq_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_user_prompt}
-                ],
-                "stream": True,
-                "temperature": 0.2
-            }
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as top_ex:
+        print(f"🔥 Critical Top-level Exception: {top_ex}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(top_ex)}")
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                async with client.stream(
-                    "POST",
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers=headers,
-                    json=payload
-                ) as response:
-                    if response.status_code != 200:
-                        err_body = await response.aread()
-                        yield f"data: {json.dumps({'chunk': f'Groq API Error ({response.status_code}): {err_body.decode()}'})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data_json = json.loads(data_str)
-                                delta = data_json["choices"][0]["delta"].get("content", "")
-                                if delta:
-                                    yield f"data: {json.dumps({'chunk': delta})}\n\n"
-                            except Exception:
-                                continue
-
-            yield f"data: {json.dumps({'status': f'Completed | {remaining}/{MAX_QUERIES_PER_DAY} queries remaining'})}\n\n"
-            yield "data: [DONE]\n\n"
-
-        except Exception as groq_err:
-            print(f"⚠️ Groq exception: {groq_err}")
-            yield f"data: {json.dumps({'chunk': f'Streaming exception: {str(groq_err)}'})}\n\n"
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
 
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all(request: Request, path_name: str):
