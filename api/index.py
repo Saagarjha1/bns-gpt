@@ -144,7 +144,9 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
 # API ENDPOINTS
 # ==========================================
 
+# Dual decorators handle both local dev and Vercel path rewrites
 @app.get("/api/health")
+@app.get("/health")
 def health_check():
     return {
         "status": "healthy",
@@ -154,6 +156,7 @@ def health_check():
 
 
 @app.get("/api/auth/token")
+@app.get("/auth/token")
 def get_auth_token(request: Request):
     client_ip = get_client_ip(request)
     token = create_jwt_token(client_ip)
@@ -161,6 +164,7 @@ def get_auth_token(request: Request):
 
 
 @app.post("/api/query/stream")
+@app.post("/query/stream")
 async def query_stream(
     req: QueryRequest,
     request: Request,
