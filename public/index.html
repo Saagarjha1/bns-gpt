@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Enterprise BNS Legal AI</title>
+  <!-- Added marked.js to render Markdown formatting dynamically -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     :root {
       --bg-color: #0f172a;
@@ -122,11 +124,24 @@
       border-radius: 8px;
       padding: 24px;
       min-height: 200px;
-      white-space: pre-wrap;
       line-height: 1.6;
       font-size: 0.98rem;
       overflow-y: auto;
       max-height: 500px;
+    }
+
+    /* Styles for Markdown elements in output */
+    .output-card h1, .output-card h2, .output-card h3 {
+      margin-top: 12px;
+      margin-bottom: 8px;
+      color: var(--accent-color);
+    }
+    .output-card p {
+      margin-bottom: 12px;
+    }
+    .output-card ul, .output-card ol {
+      margin-left: 20px;
+      margin-bottom: 12px;
     }
 
     .placeholder-text {
@@ -136,6 +151,7 @@
 
     .error-text {
       color: var(--error-color);
+      font-weight: 500;
     }
   </style>
 </head>
@@ -186,6 +202,8 @@
       submitBtn.disabled = true;
       statusBadge.textContent = 'Connecting...';
       outputBox.innerHTML = '';
+      
+      let markdownBuffer = '';
 
       try {
         const response = await fetch('/api/query/stream', {
@@ -196,9 +214,19 @@
           body: JSON.stringify({ query: query })
         });
 
+        // Safe error handling for non-200 responses
         if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.detail || 'Server request failed');
+          const rawText = await response.text();
+          let errorMessage = `Server returned status ${response.status}`;
+          
+          try {
+            const errData = JSON.parse(rawText);
+            if (errData.detail) errorMessage = errData.detail;
+          } catch (_) {
+            // Raw text was HTML (Vercel crash page)
+            errorMessage = `Server Error (${response.status}): Vercel function failed to execute. Check deployment logs.`;
+          }
+          throw new Error(errorMessage);
         }
 
         const reader = response.body.getReader();
@@ -234,12 +262,15 @@
                 }
 
                 if (data.chunk) {
-                  outputBox.textContent += data.chunk;
+                  markdownBuffer += data.chunk;
+                  // Render stream formatted as Markdown
+                  outputBox.innerHTML = typeof marked !== 'undefined' ? marked.parse(markdownBuffer) : markdownBuffer;
                   outputBox.scrollTop = outputBox.scrollHeight;
                 }
 
                 if (data.text) {
-                  outputBox.textContent = data.text;
+                  markdownBuffer = data.text;
+                  outputBox.innerHTML = typeof marked !== 'undefined' ? marked.parse(markdownBuffer) : markdownBuffer;
                 }
 
                 if (data.error) {
