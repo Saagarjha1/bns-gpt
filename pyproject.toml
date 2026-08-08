@@ -20,5 +20,4 @@ dependencies = [
     "python-dotenv>=1.0.0"
 ]
 
-[tool.vercel]
-entrypoint = "api.index:app"
+
