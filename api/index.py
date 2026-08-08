@@ -12,14 +12,13 @@ from pydantic import BaseModel
 import httpx
 import jwt
 
-# Optional Pinecone integration
+# Optional integrations with fallback
 try:
     from pinecone import Pinecone
     PINECONE_AVAILABLE = True
 except Exception:
     PINECONE_AVAILABLE = False
 
-# Optional Sentry integration
 try:
     import sentry_sdk
     SENTRY_AVAILABLE = True
@@ -122,11 +121,10 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
     headers = {"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}
     
     try:
-        async with httpx.AsyncClient(timeout=3.0) as http_client:
+        async with httpx.AsyncClient(timeout=2.5) as http_client:
             inc_res = await http_client.post(f"{UPSTASH_REDIS_REST_URL}/incr/{key}", headers=headers)
             res_data = inc_res.json()
             
-            # Safe extraction of integer count from Redis result
             raw_result = res_data.get("result") if isinstance(res_data, dict) else None
             current_count = int(raw_result) if raw_result is not None and str(raw_result).isdigit() else 1
             
@@ -138,7 +136,7 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
                 return False, 0
             return True, remaining
     except Exception as err:
-        print(f"⚠️ Rate limit error: {err}")
+        print(f"⚠️ Rate limit warning: {err}")
         return True, MAX_QUERIES_PER_DAY
 
 
@@ -197,7 +195,6 @@ async def query_stream(
             if index and PINECONE_API_KEY:
                 try:
                     loop = asyncio.get_event_loop()
-                    # Safe query attempting common vector dimensions
                     query_res = await loop.run_in_executor(
                         None, 
                         lambda: index.query(vector=[0.0] * 1536, top_k=3, include_metadata=True)
@@ -206,7 +203,7 @@ async def query_stream(
                         if "metadata" in match and "text" in match["metadata"]:
                             candidate_docs.append({"text": match["metadata"]["text"]})
                 except Exception as vector_err:
-                    print(f"⚠️ Pinecone query bypassed: {vector_err}")
+                    print(f"⚠️ Vector search warning: {vector_err}")
 
             contexts = [doc["text"] for doc in candidate_docs[:3]] if candidate_docs else []
 
@@ -218,7 +215,7 @@ async def query_stream(
                 fallback_text = (
                     f"### Query: {user_query}\n\n"
                     "**Configuration Required:** `GROQ_API_KEY` is not set in Vercel Environment Variables.\n\n"
-                    "Please set `GROQ_API_KEY` in Vercel Project Settings -> Environment Variables and redeploy."
+                    "Please add `GROQ_API_KEY` to Vercel Settings -> Environment Variables and redeploy."
                 )
                 yield f"data: {json.dumps({'chunk': fallback_text})}\n\n"
                 yield "data: [DONE]\n\n"
@@ -247,7 +244,7 @@ async def query_stream(
                     "temperature": 0.2
                 }
 
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=25.0) as client:
                     async with client.stream(
                         "POST",
                         "https://api.groq.com/openai/v1/chat/completions",
@@ -293,7 +290,6 @@ async def query_stream(
     except HTTPException as http_ex:
         raise http_ex
     except Exception as top_ex:
-        print(f"🔥 Critical Top-level Exception: {top_ex}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(top_ex)}")
 
 
@@ -301,9 +297,5 @@ async def query_stream(
 async def catch_all(request: Request, path_name: str):
     return JSONResponse(
         status_code=404,
-        content={
-            "error": "Route not found",
-            "requested_path": path_name,
-            "full_url": str(request.url)
-        }
+        content={"error": "Route not found", "requested_path": path_name}
     )
