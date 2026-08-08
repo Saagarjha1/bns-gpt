@@ -1,31 +1,27 @@
-from pinecone import Pinecone
+import os
+import httpx
 
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+HF_MODEL_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
 
-def hybrid_search_and_rerank(query: str, top_k_initial: int = 15, top_n_final: int = 3):
-    # 1. Broad Retrieval (Top 15 Candidates via Dense + Sparse Hybrid Search)
-    initial_results = index.query(
-        vector=dense_embedding,
-        sparse_vector=sparse_embedding,
-        top_k=top_k_initial,
-        include_metadata=True
-    )
-    
-    # Format candidates for Pinecone Inference Reranker
-    candidate_docs = [
-        {"id": match.id, "text": match.metadata["text"]} 
-        for match in initial_results.matches
-    ]
-    
-    # 2. Cross-Encoder Precision Reranking via Pinecone Inference API
-    rerank_response = pc.inference.rerank(
-        model="bge-reranker-v2-m3",
-        query=query,
-        documents=candidate_docs,
-        top_n=top_n_final,
-        return_documents=True
-    )
-    
-    # 3. Extract Top-N precision re-ranked context
-    reranked_docs = [item.document.text for item in rerank_response.data]
-    return reranked_docs
+async def get_query_embedding_async(text: str) -> list[float]:
+    """Retrieves sentence embeddings from HuggingFace with a 3-second hard timeout."""
+    if not HUGGINGFACE_API_KEY:
+        return [0.0] * 384
+
+    headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+    payload = {"inputs": text}
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(HF_MODEL_URL, headers=headers, json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], float):
+                    return data
+                elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                    return data[0]
+    except Exception as err:
+        print(f"⚠️ HuggingFace API network timeout or error: {err}")
+
+    return [0.0] * 384
