@@ -5,16 +5,16 @@ import time
 import random
 import asyncio
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Any, Optional
+from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 import httpx
 import jwt
 
-# 384-dimensional query embeddings for the Pinecone index
 from services.retriever import get_query_embedding_async
 
 
@@ -74,6 +74,8 @@ VALID_GROQ_KEYS = [
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
+# IMPORTANT:
+# This must point to the new 563-vector index.
 PINECONE_INDEX_NAME = os.getenv(
     "PINECONE_INDEX_NAME",
     "bns-legal-index-v2"
@@ -107,7 +109,9 @@ if SENTRY_AVAILABLE and SENTRY_DSN:
             traces_sample_rate=1.0
         )
     except Exception as e:
-        print(f"⚠️ Sentry initialization warning: {e}")
+        print(
+            f"⚠️ Sentry initialization warning: {e}"
+        )
 
 
 # ==========================================
@@ -118,7 +122,6 @@ app = FastAPI(
     title="Enterprise BNS Legal AI API",
     version="1.0.0"
 )
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -141,18 +144,20 @@ PINECONE_VECTOR_COUNT = None
 
 
 def initialize_pinecone():
+
     global pc
     global index
     global PINECONE_ERROR
     global PINECONE_VECTOR_COUNT
 
     print("")
-    print("==========================================")
+    print("=" * 60)
     print("        PINECONE INITIALIZATION")
-    print("==========================================")
+    print("=" * 60)
 
     print(
-        f"PINECONE_AVAILABLE: {PINECONE_AVAILABLE}"
+        f"PINECONE_AVAILABLE: "
+        f"{PINECONE_AVAILABLE}"
     )
 
     print(
@@ -179,15 +184,10 @@ def initialize_pinecone():
 
         if PINECONE_IMPORT_ERROR:
             print(
-                f"Import error: {PINECONE_IMPORT_ERROR}"
+                f"Import error: "
+                f"{PINECONE_IMPORT_ERROR}"
             )
 
-        print(
-            "Install the 'pinecone' package in "
-            "requirements.txt."
-        )
-
-        print("==========================================")
         return
 
     # --------------------------------------
@@ -207,7 +207,6 @@ def initialize_pinecone():
             "Environment Variables."
         )
 
-        print("==========================================")
         return
 
     # --------------------------------------
@@ -223,7 +222,7 @@ def initialize_pinecone():
         print("✅ Pinecone client created")
 
         # ----------------------------------
-        # Verify index exists
+        # Verify indexes
         # ----------------------------------
 
         index_list = pc.list_indexes()
@@ -231,12 +230,15 @@ def initialize_pinecone():
         available_indexes = []
 
         try:
+
             for item in index_list:
 
                 if isinstance(item, dict):
+
                     name = item.get("name")
 
                 else:
+
                     name = getattr(
                         item,
                         "name",
@@ -247,8 +249,10 @@ def initialize_pinecone():
                     available_indexes.append(name)
 
         except Exception as e:
+
             print(
-                f"⚠️ Could not parse index list: {e}"
+                f"⚠️ Could not parse index list: "
+                f"{e}"
             )
 
         print(
@@ -263,8 +267,10 @@ def initialize_pinecone():
         ):
 
             raise RuntimeError(
-                f"Index '{PINECONE_INDEX_NAME}' "
-                f"was not found. Available indexes: "
+                f"Index "
+                f"'{PINECONE_INDEX_NAME}' "
+                f"was not found. "
+                f"Available indexes: "
                 f"{available_indexes}"
             )
 
@@ -290,7 +296,9 @@ def initialize_pinecone():
         if isinstance(stats, dict):
 
             PINECONE_VECTOR_COUNT = (
-                stats.get("total_vector_count")
+                stats.get(
+                    "total_vector_count"
+                )
             )
 
         else:
@@ -302,7 +310,8 @@ def initialize_pinecone():
             )
 
         print(
-            f"✅ Pinecone connection test successful"
+            "✅ Pinecone connection test "
+            "successful"
         )
 
         print(
@@ -320,20 +329,24 @@ def initialize_pinecone():
         index = None
 
         print("")
-        print("❌ PINECONE INITIALIZATION FAILED")
         print(
-            f"Error type: {type(e).__name__}"
+            "❌ PINECONE INITIALIZATION FAILED"
         )
+
+        print(
+            f"Error type: "
+            f"{type(e).__name__}"
+        )
+
         print(
             f"Error: {e}"
         )
-        print("")
 
-    print("==========================================")
+    print("=" * 60)
     print("")
 
 
-# Initialize at application startup
+# Initialize Pinecone
 initialize_pinecone()
 
 
@@ -349,7 +362,9 @@ class QueryRequest(BaseModel):
 # HELPERS
 # ==========================================
 
-def get_client_ip(request: Request) -> str:
+def get_client_ip(
+    request: Request
+) -> str:
 
     x_forwarded_for = request.headers.get(
         "x-forwarded-for"
@@ -357,7 +372,11 @@ def get_client_ip(request: Request) -> str:
 
     if x_forwarded_for:
 
-        return x_forwarded_for.split(",")[0].strip()
+        return (
+            x_forwarded_for
+            .split(",")[0]
+            .strip()
+        )
 
     return (
         request.client.host
@@ -366,7 +385,9 @@ def get_client_ip(request: Request) -> str:
     )
 
 
-def create_jwt_token(ip: str) -> str:
+def create_jwt_token(
+    ip: str
+) -> str:
 
     now = int(time.time())
 
@@ -415,6 +436,7 @@ async def check_rate_limit_async(
         not UPSTASH_REDIS_REST_URL
         or not UPSTASH_REDIS_REST_TOKEN
     ):
+
         return True, MAX_QUERIES_PER_DAY
 
     key = (
@@ -425,7 +447,8 @@ async def check_rate_limit_async(
 
     headers = {
         "Authorization":
-            f"Bearer {UPSTASH_REDIS_REST_TOKEN}"
+            f"Bearer "
+            f"{UPSTASH_REDIS_REST_TOKEN}"
     }
 
     try:
@@ -435,7 +458,8 @@ async def check_rate_limit_async(
         ) as http_client:
 
             inc_res = await http_client.post(
-                f"{UPSTASH_REDIS_REST_URL}/incr/{key}",
+                f"{UPSTASH_REDIS_REST_URL}"
+                f"/incr/{key}",
                 headers=headers
             )
 
@@ -443,20 +467,28 @@ async def check_rate_limit_async(
 
             raw_result = (
                 res_data.get("result")
-                if isinstance(res_data, dict)
+                if isinstance(
+                    res_data,
+                    dict
+                )
                 else None
             )
 
             try:
-                current_count = int(raw_result)
+
+                current_count = int(
+                    raw_result
+                )
+
             except Exception:
+
                 current_count = 1
 
             if current_count == 1:
 
                 await http_client.post(
-                    f"{UPSTASH_REDIS_REST_URL}/expire/"
-                    f"{key}/86400",
+                    f"{UPSTASH_REDIS_REST_URL}"
+                    f"/expire/{key}/86400",
                     headers=headers
                 )
 
@@ -470,6 +502,7 @@ async def check_rate_limit_async(
                 current_count
                 > MAX_QUERIES_PER_DAY
             ):
+
                 return False, 0
 
             return True, remaining
@@ -477,11 +510,10 @@ async def check_rate_limit_async(
     except Exception as err:
 
         print(
-            f"⚠️ Rate limit warning: {err}"
+            f"⚠️ Rate limit warning: "
+            f"{err}"
         )
 
-        # Fail open so Redis problems do not
-        # take down the API.
         return True, MAX_QUERIES_PER_DAY
 
 
@@ -497,6 +529,7 @@ def health_check():
     pinecone_ok = index is not None
 
     return {
+
         "status": (
             "healthy"
             if pinecone_ok
@@ -536,7 +569,9 @@ def get_auth_token(
     request: Request
 ):
 
-    client_ip = get_client_ip(request)
+    client_ip = get_client_ip(
+        request
+    )
 
     token = create_jwt_token(
         client_ip
@@ -552,24 +587,49 @@ def get_auth_token(
 # PINECONE SEARCH
 # ==========================================
 
-def get_pinecone_matches(query_vector):
+def get_pinecone_matches(
+    query_vector
+):
 
     if not index:
+
         return []
 
-    # Your Pinecone index is configured for 384 dimensions.
-    if not isinstance(query_vector, list) or len(query_vector) != 384:
+    # --------------------------------------
+    # Validate dimension
+    # --------------------------------------
+
+    if (
+        not isinstance(
+            query_vector,
+            list
+        )
+        or len(query_vector) != 384
+    ):
+
         raise ValueError(
-            f"Invalid query vector dimension: "
+            "Invalid query vector "
+            "dimension: "
             f"expected 384, got "
-            f"{len(query_vector) if isinstance(query_vector, list) else 'invalid'}"
+            f"{len(query_vector) "
+            if isinstance(
+                query_vector,
+                list
+            )
+            else 'invalid'}"
         )
 
-    # Never search Pinecone with an all-zero vector.
-    if not any(float(value) != 0.0 for value in query_vector):
+    # --------------------------------------
+    # Prevent zero-vector search
+    # --------------------------------------
+
+    if not any(
+        float(value) != 0.0
+        for value in query_vector
+    ):
+
         raise ValueError(
-            "Query embedding is all zeros. "
-            "HuggingFace embedding generation failed."
+            "Query embedding is all zeros."
         )
 
     try:
@@ -580,22 +640,118 @@ def get_pinecone_matches(query_vector):
             include_metadata=True
         )
 
-        if hasattr(result, "matches"):
+        if hasattr(
+            result,
+            "matches"
+        ):
+
             return result.matches
 
-        if isinstance(result, dict):
-            return result.get("matches", [])
+        if isinstance(
+            result,
+            dict
+        ):
+
+            return result.get(
+                "matches",
+                []
+            )
 
         return []
 
     except Exception as e:
 
         print(
-            f"⚠️ Pinecone query error: "
+            f"❌ Pinecone query error: "
             f"{type(e).__name__}: {e}"
         )
 
-        return []
+        raise
+
+
+# ==========================================
+# EXTRACT MATCH DATA
+# ==========================================
+
+def extract_match_data(
+    match
+):
+
+    if hasattr(
+        match,
+        "metadata"
+    ):
+
+        metadata = (
+            match.metadata
+        )
+
+    elif isinstance(
+        match,
+        dict
+    ):
+
+        metadata = match.get(
+            "metadata",
+            {}
+        )
+
+    else:
+
+        metadata = {}
+
+    if not isinstance(
+        metadata,
+        dict
+    ):
+
+        metadata = {}
+
+    if hasattr(
+        match,
+        "score"
+    ):
+
+        score = match.score
+
+    elif isinstance(
+        match,
+        dict
+    ):
+
+        score = match.get(
+            "score"
+        )
+
+    else:
+
+        score = None
+
+    if hasattr(
+        match,
+        "id"
+    ):
+
+        match_id = match.id
+
+    elif isinstance(
+        match,
+        dict
+    ):
+
+        match_id = match.get(
+            "id"
+        )
+
+    else:
+
+        match_id = None
+
+    return (
+        match_id,
+        score,
+        metadata
+    )
 
 
 # ==========================================
@@ -622,7 +778,10 @@ async def query_stream(
 
             raise HTTPException(
                 status_code=400,
-                detail="Query string cannot be empty."
+                detail=(
+                    "Query string "
+                    "cannot be empty."
+                )
             )
 
         # ----------------------------------
@@ -639,7 +798,9 @@ async def query_stream(
 
         if (
             authorization
-            and authorization.startswith("Bearer ")
+            and authorization.startswith(
+                "Bearer "
+            )
         ):
 
             token = authorization.split(
@@ -651,7 +812,10 @@ async def query_stream(
                 token
             )
 
-            if decoded and "ip" in decoded:
+            if (
+                decoded
+                and "ip" in decoded
+            ):
 
                 client_ip = decoded["ip"]
 
@@ -670,10 +834,10 @@ async def query_stream(
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    f"Rate limit exceeded. "
+                    "Rate limit exceeded. "
                     f"Maximum "
                     f"{MAX_QUERIES_PER_DAY} "
-                    f"queries allowed per day."
+                    "queries allowed per day."
                 )
             )
 
@@ -703,107 +867,271 @@ async def query_stream(
             await asyncio.sleep(0.01)
 
             # --------------------------------
-            # Pinecone
+            # Candidate documents
             # --------------------------------
 
             candidate_docs = []
 
-            if index and PINECONE_API_KEY:
+            # =================================
+            # PINECONE RETRIEVAL
+            # =================================
 
-                try:
+            if not index:
 
-                    # Generate the REAL 384-dimensional query embedding
-                    # using the same MiniLM model used by services/retriever.py.
-                    query_vector = await get_query_embedding_async(
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "chunk":
+                            "Pinecone is not "
+                            "connected."
+                    })
+                    + "\n\n"
+                )
+
+                yield "data: [DONE]\n\n"
+
+                return
+
+            try:
+
+                # --------------------------------
+                # Generate 384-dimensional query
+                # embedding using MiniLM.
+                # --------------------------------
+
+                print("")
+                print("=" * 60)
+                print(
+                    "🔎 GENERATING QUERY EMBEDDING"
+                )
+                print("=" * 60)
+
+                query_vector = (
+                    await get_query_embedding_async(
                         user_query
                     )
+                )
 
-                    print(
-                        f"🔎 Query embedding dimension: "
+                print(
+                    f"✅ Query embedding "
+                    f"dimension: "
+                    f"{len(query_vector)}"
+                )
+
+                # --------------------------------
+                # Validate vector
+                # --------------------------------
+
+                if (
+                    not isinstance(
+                        query_vector,
+                        list
+                    )
+                    or len(query_vector) != 384
+                ):
+
+                    raise RuntimeError(
+                        "Wrong embedding dimension: "
+                        f"expected 384, got "
                         f"{len(query_vector)}"
                     )
 
-                    if len(query_vector) != 384:
-                        raise RuntimeError(
-                            f"Wrong embedding dimension: "
-                            f"expected 384, got {len(query_vector)}"
-                        )
+                if not any(
+                    float(value) != 0.0
+                    for value in query_vector
+                ):
 
-                    if not any(
-                        float(value) != 0.0
-                        for value in query_vector
-                    ):
-                        raise RuntimeError(
-                            "Embedding service returned an all-zero vector."
-                        )
-
-                    loop = asyncio.get_running_loop()
-
-                    matches = (
-                        await loop.run_in_executor(
-                            None,
-                            get_pinecone_matches,
-                            query_vector
-                        )
+                    raise RuntimeError(
+                        "Embedding service "
+                        "returned an all-zero "
+                        "vector."
                     )
 
-                    for match in matches:
+                # --------------------------------
+                # Pinecone query
+                # --------------------------------
 
-                        if hasattr(
-                            match,
-                            "metadata"
-                        ):
+                loop = (
+                    asyncio.get_running_loop()
+                )
 
-                            metadata = (
-                                match.metadata
-                            )
+                matches = (
+                    await loop.run_in_executor(
+                        None,
+                        get_pinecone_matches,
+                        query_vector
+                    )
+                )
 
-                        elif isinstance(
-                            match,
+                print("")
+                print("=" * 60)
+                print(
+                    "🔎 PINECONE SEARCH RESULTS"
+                )
+                print("=" * 60)
+
+                # --------------------------------
+                # Inspect all 10 results
+                # --------------------------------
+
+                for rank, match in enumerate(
+                    matches[:10],
+                    start=1
+                ):
+
+                    (
+                        match_id,
+                        score,
+                        metadata
+                    ) = extract_match_data(
+                        match
+                    )
+
+                    text = (
+                        metadata.get(
+                            "text",
+                            ""
+                        )
+                        if isinstance(
+                            metadata,
                             dict
-                        ):
-
-                            metadata = (
-                                match.get(
-                                    "metadata",
-                                    {}
-                                )
-                            )
-
-                        else:
-
-                            metadata = {}
-
-                        if (
-                            isinstance(
-                                metadata,
-                                dict
-                            )
-                            and metadata.get("text")
-                        ):
-
-                            candidate_docs.append({
-                                "text":
-                                    metadata["text"]
-                            })
-
-                except Exception as vector_err:
+                        )
+                        else ""
+                    )
 
                     print(
-                        "⚠️ Vector search warning: "
-                        f"{type(vector_err).__name__}: "
-                        f"{vector_err}"
+                        f"\n#{rank} "
+                        f"| score={score} "
+                        f"| id={match_id}"
                     )
 
-            # --------------------------------
-            # Context
-            # --------------------------------
+                    print(
+                        text[:700]
+                    )
 
+                # --------------------------------
+                # Build candidate documents
+                # --------------------------------
+
+                for match in matches[:10]:
+
+                    (
+                        match_id,
+                        score,
+                        metadata
+                    ) = extract_match_data(
+                        match
+                    )
+
+                    if (
+                        isinstance(
+                            metadata,
+                            dict
+                        )
+                        and metadata.get("text")
+                    ):
+
+                        candidate_docs.append({
+
+                            "id":
+                                match_id,
+
+                            "score":
+                                score,
+
+                            "text":
+                                metadata["text"],
+
+                            "prompt":
+                                metadata.get(
+                                    "prompt",
+                                    ""
+                                ),
+
+                            "response":
+                                metadata.get(
+                                    "response",
+                                    ""
+                                )
+                        })
+
+                print("")
+                print(
+                    f"📚 Candidate documents: "
+                    f"{len(candidate_docs)}"
+                )
+
+            except Exception as vector_err:
+
+                print("")
+                print(
+                    "❌ VECTOR SEARCH FAILED"
+                )
+
+                print(
+                    f"Error type: "
+                    f"{type(vector_err).__name__}"
+                )
+
+                print(
+                    f"Error: {vector_err}"
+                )
+
+                # IMPORTANT:
+                # Do not silently send an empty
+                # context to Groq.
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "chunk":
+                            "I could not retrieve "
+                            "the relevant BNS "
+                            "statutory provisions "
+                            "from the legal database. "
+                            "Please try the query again."
+                    })
+                    + "\n\n"
+                )
+
+                yield "data: [DONE]\n\n"
+
+                return
+
+            # =================================
+            # CONTEXT SELECTION
+            # =================================
+
+            # IMPORTANT:
+            # Pinecone returns 10.
+            # We now pass TOP 5 to Groq.
             contexts = [
                 doc["text"]
                 for doc
-                in candidate_docs[:3]
+                in candidate_docs[:5]
             ]
+
+            print("")
+            print(
+                f"📖 Context documents sent "
+                f"to Groq: {len(contexts)}"
+            )
+
+            # --------------------------------
+            # Show context selection
+            # --------------------------------
+
+            for i, context in enumerate(
+                contexts,
+                start=1
+            ):
+
+                print(
+                    f"\n--- CONTEXT {i} ---"
+                )
+
+                print(
+                    context[:700]
+                )
 
             yield (
                 "data: "
@@ -814,9 +1142,9 @@ async def query_stream(
                 + "\n\n"
             )
 
-            # --------------------------------
-            # Groq key
-            # --------------------------------
+            # =================================
+            # GROQ KEY
+            # =================================
 
             selected_groq_key = (
                 random.choice(
@@ -829,10 +1157,11 @@ async def query_stream(
             if not selected_groq_key:
 
                 fallback_text = (
-                    f"### Query: {user_query}\n\n"
+                    f"### Query: "
+                    f"{user_query}\n\n"
                     "**Configuration Required:** "
-                    "`GROQ_API_KEY` is not set "
-                    "in Environment Variables."
+                    "`GROQ_API_KEY` is not "
+                    "set in Environment Variables."
                 )
 
                 yield (
@@ -848,72 +1177,142 @@ async def query_stream(
 
                 return
 
-            # --------------------------------
-            # Legal system prompt
-            # --------------------------------
+            # =================================
+            # LEGAL SYSTEM PROMPT
+            # =================================
 
             system_prompt = (
-                "You are an expert legal assistant "
-                "specializing in the Bharatiya "
-                "Nyaya Sanhita (BNS), 2023. "
-                "Provide precise, structured, "
-                "and legally accurate answers "
-                "based on statutory provisions. "
-                "Cite relevant BNS section numbers "
-                "where applicable. "
-                "Do not invent section numbers. "
-                "If the supplied context does not "
-                "contain enough information, say so."
+
+                "You are an expert legal "
+                "research assistant specializing "
+                "in the Bharatiya Nyaya Sanhita "
+                "(BNS), 2023.\n\n"
+
+                "Answer the user's question "
+                "ONLY using the supplied "
+                "retrieved legal context.\n\n"
+
+                "IMPORTANT RULES:\n"
+
+                "1. Prefer the context that "
+                "directly answers the user's "
+                "question.\n"
+
+                "2. If the context contains an "
+                "IPC section and its corresponding "
+                "BNS section, use that mapping "
+                "for IPC-to-BNS questions.\n"
+
+                "3. Cite the exact BNS section "
+                "number appearing in the context.\n"
+
+                "4. State the applicable "
+                "punishment, imprisonment, fine, "
+                "or community service when it "
+                "appears in the retrieved "
+                "statutory text.\n"
+
+                "5. Do NOT invent section numbers.\n"
+
+                "6. Do NOT guess statutory "
+                "provisions from general knowledge.\n"
+
+                "7. Do NOT say that information "
+                "is missing if the supplied "
+                "context actually contains "
+                "the answer.\n"
+
+                "8. If multiple retrieved "
+                "provisions are relevant, "
+                "identify the provision that "
+                "most directly answers the query.\n"
+
+                "9. Clearly distinguish IPC "
+                "sections from BNS sections.\n\n"
+
+                "Give a concise and structured "
+                "legal answer."
             )
 
-            context_str = (
-                "\n\n".join(contexts)
-                if contexts
-                else
-                "No relevant statutory provisions "
-                "were retrieved from the vector index."
+            # =================================
+            # CONTEXT
+            # =================================
+
+            context_str = "\n\n".join(
+                [
+                    (
+                        f"Source {i + 1}:\n"
+                        f"{context}"
+                    )
+                    for i, context
+                    in enumerate(contexts)
+                ]
             )
+
+            if not context_str:
+
+                context_str = (
+                    "No relevant statutory "
+                    "provisions were retrieved "
+                    "from the vector index."
+                )
 
             full_user_prompt = (
-                f"Context:\n"
+                "RETRIEVED LEGAL CONTEXT:\n\n"
                 f"{context_str}\n\n"
-                f"User Legal Query:\n"
-                f"{user_query}"
+                "USER LEGAL QUERY:\n"
+                f"{user_query}\n\n"
+                "Answer the query using the "
+                "retrieved context above."
             )
 
-            # --------------------------------
-            # Groq request
-            # --------------------------------
+            # =================================
+            # GROQ REQUEST
+            # =================================
 
             try:
 
                 headers = {
                     "Authorization":
-                        f"Bearer {selected_groq_key}",
+                        f"Bearer "
+                        f"{selected_groq_key}",
+
                     "Content-Type":
                         "application/json"
                 }
 
                 payload = {
+
                     "model":
                         "llama-3.3-70b-versatile",
 
                     "messages": [
+
                         {
-                            "role": "system",
+                            "role":
+                                "system",
+
                             "content":
                                 system_prompt
                         },
+
                         {
-                            "role": "user",
+                            "role":
+                                "user",
+
                             "content":
                                 full_user_prompt
                         }
                     ],
 
-                    "stream": True,
+                    "stream":
+                        True,
 
-                    "temperature": 0.2
+                    "temperature":
+                        0.1,
+
+                    "max_tokens":
+                        600
                 }
 
                 async with httpx.AsyncClient(
@@ -922,16 +1321,44 @@ async def query_stream(
 
                     async with client.stream(
                         "POST",
-                        "https://api.groq.com/"
-                        "openai/v1/chat/completions",
+                        (
+                            "https://api.groq.com/"
+                            "openai/v1/chat/completions"
+                        ),
                         headers=headers,
                         json=payload
                     ) as response:
 
-                        if response.status_code != 200:
+                        # --------------------------------
+                        # Groq error
+                        # --------------------------------
+
+                        if (
+                            response.status_code
+                            != 200
+                        ):
 
                             err_body = (
                                 await response.aread()
+                            )
+
+                            error_text = (
+                                err_body.decode(
+                                    errors="replace"
+                                )
+                            )
+
+                            print(
+                                "❌ Groq API error:"
+                            )
+
+                            print(
+                                f"HTTP "
+                                f"{response.status_code}"
+                            )
+
+                            print(
+                                error_text[:2000]
                             )
 
                             yield (
@@ -940,7 +1367,7 @@ async def query_stream(
                                     "chunk":
                                         "Groq API Error "
                                         f"({response.status_code}): "
-                                        f"{err_body.decode()}"
+                                        f"{error_text[:1000]}"
                                 })
                                 + "\n\n"
                             )
@@ -951,6 +1378,10 @@ async def query_stream(
 
                             return
 
+                        # --------------------------------
+                        # Stream response
+                        # --------------------------------
+
                         async for line in (
                             response.aiter_lines()
                         ):
@@ -958,13 +1389,17 @@ async def query_stream(
                             if not line.startswith(
                                 "data: "
                             ):
+
                                 continue
 
                             data_str = (
                                 line[6:].strip()
                             )
 
-                            if data_str == "[DONE]":
+                            if (
+                                data_str
+                                == "[DONE]"
+                            ):
 
                                 break
 
@@ -988,7 +1423,10 @@ async def query_stream(
 
                                 delta = (
                                     choices[0]
-                                    .get("delta", {})
+                                    .get(
+                                        "delta",
+                                        {}
+                                    )
                                     .get(
                                         "content",
                                         ""
@@ -1006,7 +1444,13 @@ async def query_stream(
                                         + "\n\n"
                                     )
 
-                            except Exception:
+                            except Exception as stream_err:
+
+                                print(
+                                    "⚠️ Stream "
+                                    "parse warning: "
+                                    f"{stream_err}"
+                                )
 
                                 continue
 
@@ -1049,9 +1493,9 @@ async def query_stream(
 
                 yield "data: [DONE]\n\n"
 
-        # ----------------------------------
+        # --------------------------------------
         # StreamingResponse
-        # ----------------------------------
+        # --------------------------------------
 
         return StreamingResponse(
             event_generator(),
@@ -1059,8 +1503,10 @@ async def query_stream(
             headers={
                 "Cache-Control":
                     "no-cache",
+
                 "Connection":
                     "keep-alive",
+
                 "X-Accel-Buffering":
                     "no"
             }
@@ -1110,6 +1556,7 @@ async def catch_all(
         content={
             "error":
                 "Route not found",
+
             "requested_path":
                 path_name
         }
