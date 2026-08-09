@@ -1,8 +1,10 @@
 import os
+import sys
 import json
 import time
 import random
 import asyncio
+from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -11,6 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 import jwt
+
+# ==========================================
+# PATH CONFIGURATION (Fix for Render/Linux imports)
+# ==========================================
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # Optional integrations with fallback
 try:
@@ -144,9 +153,9 @@ async def check_rate_limit_async(client_ip: str) -> tuple[bool, int]:
 # API ENDPOINTS
 # ==========================================
 
-# Dual decorators handle both local dev and Vercel path rewrites
-@app.get("/api/health")
+@app.get("/")
 @app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {
         "status": "healthy",
@@ -155,16 +164,16 @@ def health_check():
     }
 
 
-@app.get("/api/auth/token")
 @app.get("/auth/token")
+@app.get("/api/auth/token")
 def get_auth_token(request: Request):
     client_ip = get_client_ip(request)
     token = create_jwt_token(client_ip)
     return {"token": token, "ip": client_ip}
 
 
-@app.post("/api/query/stream")
 @app.post("/query/stream")
+@app.post("/api/query/stream")
 async def query_stream(
     req: QueryRequest,
     request: Request,
@@ -218,8 +227,8 @@ async def query_stream(
             if not selected_groq_key:
                 fallback_text = (
                     f"### Query: {user_query}\n\n"
-                    "**Configuration Required:** `GROQ_API_KEY` is not set in Vercel Environment Variables.\n\n"
-                    "Please add `GROQ_API_KEY` to Vercel Settings -> Environment Variables and redeploy."
+                    "**Configuration Required:** `GROQ_API_KEY` is not set in Environment Variables.\n\n"
+                    "Please add `GROQ_API_KEY` in your Render dashboard environment settings."
                 )
                 yield f"data: {json.dumps({'chunk': fallback_text})}\n\n"
                 yield "data: [DONE]\n\n"
@@ -248,7 +257,7 @@ async def query_stream(
                     "temperature": 0.2
                 }
 
-                async with httpx.AsyncClient(timeout=25.0) as client:
+                async with httpx.AsyncClient(timeout=30.0) as client:
                     async with client.stream(
                         "POST",
                         "https://api.groq.com/openai/v1/chat/completions",
