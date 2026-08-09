@@ -14,6 +14,9 @@ from pydantic import BaseModel
 import httpx
 import jwt
 
+# 384-dimensional query embeddings for the Pinecone index
+from services.retriever import get_query_embedding_async
+
 
 # ==========================================
 # PATH CONFIGURATION
@@ -549,44 +552,41 @@ def get_auth_token(
 # PINECONE SEARCH
 # ==========================================
 
-def get_pinecone_matches():
+def get_pinecone_matches(query_vector):
 
     if not index:
-
         return []
+
+    # Your Pinecone index is configured for 384 dimensions.
+    if not isinstance(query_vector, list) or len(query_vector) != 384:
+        raise ValueError(
+            f"Invalid query vector dimension: "
+            f"expected 384, got "
+            f"{len(query_vector) if isinstance(query_vector, list) else 'invalid'}"
+        )
+
+    # Never search Pinecone with an all-zero vector.
+    if not any(float(value) != 0.0 for value in query_vector):
+        raise ValueError(
+            "Query embedding is all zeros. "
+            "HuggingFace embedding generation failed."
+        )
 
     try:
 
-        # TEMPORARY CONNECTION TEST.
-        #
-        # This proves that Pinecone is reachable,
-        # but it is NOT semantic search.
-        #
-        # We will replace this with the actual
-        # embedding of the user's question next.
-
         result = index.query(
-            vector=[0.0] * 1536,
-            top_k=3,
+            vector=query_vector,
+            top_k=10,
             include_metadata=True
         )
 
         if hasattr(result, "matches"):
+            return result.matches
 
-            matches = result.matches
+        if isinstance(result, dict):
+            return result.get("matches", [])
 
-        elif isinstance(result, dict):
-
-            matches = result.get(
-                "matches",
-                []
-            )
-
-        else:
-
-            matches = []
-
-        return matches
+        return []
 
     except Exception as e:
 
@@ -712,12 +712,38 @@ async def query_stream(
 
                 try:
 
+                    # Generate the REAL 384-dimensional query embedding
+                    # using the same MiniLM model used by services/retriever.py.
+                    query_vector = await get_query_embedding_async(
+                        user_query
+                    )
+
+                    print(
+                        f"🔎 Query embedding dimension: "
+                        f"{len(query_vector)}"
+                    )
+
+                    if len(query_vector) != 384:
+                        raise RuntimeError(
+                            f"Wrong embedding dimension: "
+                            f"expected 384, got {len(query_vector)}"
+                        )
+
+                    if not any(
+                        float(value) != 0.0
+                        for value in query_vector
+                    ):
+                        raise RuntimeError(
+                            "Embedding service returned an all-zero vector."
+                        )
+
                     loop = asyncio.get_running_loop()
 
                     matches = (
                         await loop.run_in_executor(
                             None,
-                            get_pinecone_matches
+                            get_pinecone_matches,
+                            query_vector
                         )
                     )
 
