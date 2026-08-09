@@ -1,313 +1,987 @@
+from pathlib import Path
+
+code = r'''import os
 import sys
 import json
 import time
 import random
 import asyncio
+import hashlib
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, Optional
+
+import httpx
+import jwt
 
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import httpx
-import jwt
 
-\# ==========================================
-\# PATH CONFIGURATION (Fix for Render/Linux imports)
-\# ==========================================
-ROOT\_DIR = Path(\_\_file\_\_).resolve().parent.parent
-if str(ROOT\_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT\_DIR))
 
-\# Optional integrations with fallback
+# ==========================================
+# PATH CONFIGURATION
+# ==========================================
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+# ==========================================
+# OPTIONAL PINECONE INTEGRATION
+# ==========================================
+
 try:
     from pinecone import Pinecone
-    PINECONE\_AVAILABLE = True
-except Exception:
-    PINECONE\_AVAILABLE = False
+    PINECONE_AVAILABLE = True
+except Exception as e:
+    PINECONE_AVAILABLE = False
+    print(f"WARNING: Pinecone package unavailable: {e}")
+
+
+# ==========================================
+# OPTIONAL SENTRY
+# ==========================================
 
 try:
-    import sentry\_sdk
-    SENTRY\_AVAILABLE = True
-except Exception:
-    SENTRY\_AVAILABLE = False
+    import sentry_sdk
+    SENTRY_AVAILABLE = True
+except Exception as e:
+    SENTRY_AVAILABLE = False
+    print(f"WARNING: Sentry unavailable: {e}")
 
 
-\# ==========================================
-\# ENVIRONMENT & CONFIGURATION
-\# ==========================================
+# ==========================================
+# ENVIRONMENT & CONFIGURATION
+# ==========================================
 
-GROQ\_KEYS = [
-    os.getenv("GROQ\_API\_KEY"),
-    os.getenv("GROQ\_API\_KEY\_1"),
-    os.getenv("GROQ\_API\_KEY\_2"),
-    os.getenv("GROQ\_API\_KEY\_3"),
-    os.getenv("GROQ\_API\_KEY\_4"),
-    os.getenv("GROQ\_API\_KEY\_5"),
+GROQ_KEYS = [
+    os.getenv("GROQ_API_KEY"),
+    os.getenv("GROQ_API_KEY_1"),
+    os.getenv("GROQ_API_KEY_2"),
+    os.getenv("GROQ_API_KEY_3"),
+    os.getenv("GROQ_API_KEY_4"),
+    os.getenv("GROQ_API_KEY_5"),
 ]
-VALID\_GROQ\_KEYS = [k for k in GROQ\_KEYS if k and k.strip()]
 
-PINECONE\_API\_KEY = os.getenv("PINECONE\_API\_KEY")
-PINECONE\_INDEX\_NAME = os.getenv("PINECONE\_INDEX\_NAME", "bns-legal")
-JWT\_SECRET = os.getenv("JWT\_SECRET") or os.getenv("JWT\_SECRET\_KEY") or "super-secret-bns-key"
-UPSTASH\_REDIS\_REST\_URL = os.getenv("UPSTASH\_REDIS\_REST\_URL")
-UPSTASH\_REDIS\_REST\_TOKEN = os.getenv("UPSTASH\_REDIS\_REST\_TOKEN")
-SENTRY\_DSN = os.getenv("SENTRY\_DSN")
+VALID_GROQ_KEYS = [
+    key.strip()
+    for key in GROQ_KEYS
+    if key and key.strip()
+]
 
-if SENTRY\_AVAILABLE and SENTRY\_DSN:
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+# Your actual Pinecone index.
+PINECONE_INDEX_NAME = os.getenv(
+    "PINECONE_INDEX_NAME",
+    "bns-legal-index",
+)
+
+# Your Pinecone records are in the default namespace.
+PINECONE_NAMESPACE = os.getenv(
+    "PINECONE_NAMESPACE",
+    "default",
+)
+
+# Hugging Face token is optional for the public inference endpoint.
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
+
+JWT_SECRET = (
+    os.getenv("JWT_SECRET")
+    or os.getenv("JWT_SECRET_KEY")
+    or "super-secret-bns-key"
+)
+
+UPSTASH_REDIS_REST_URL = os.getenv(
+    "UPSTASH_REDIS_REST_URL"
+)
+
+UPSTASH_REDIS_REST_TOKEN = os.getenv(
+    "UPSTASH_REDIS_REST_TOKEN"
+)
+
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+
+# ==========================================
+# SENTRY INITIALIZATION
+# ==========================================
+
+if SENTRY_AVAILABLE and SENTRY_DSN:
     try:
-        sentry\_sdk.init(dsn=SENTRY\_DSN, traces\_sample\_rate=1.0)
-    except Exception:
-        pass
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=1.0,
+        )
+        print("Sentry initialized.")
+    except Exception as e:
+        print(f"WARNING: Sentry initialization failed: {e}")
 
-app = FastAPI(title="Enterprise BNS Legal AI API", version="1.0.0")
 
-app.add\_middleware(
-    CORSMiddleware,
-    allow\_origins=["\*"],
-    allow\_credentials=True,
-    allow\_methods=["\*"],
-    allow\_headers=["\*"],
+# ==========================================
+# FASTAPI APPLICATION
+# ==========================================
+
+app = FastAPI(
+    title="Enterprise BNS Legal AI API",
+    version="1.0.0",
 )
 
 
-\# ==========================================
-\# CLIENT INITIALIZATIONS
-\# ==========================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ==========================================
+# PINECONE INITIALIZATION
+# ==========================================
+
 pc = None
 index = None
+pinecone_init_error = None
+pinecone_dimension = None
+pinecone_record_count = None
 
-if PINECONE\_AVAILABLE and PINECONE\_API\_KEY:
+
+if not PINECONE_AVAILABLE:
+    pinecone_init_error = "Pinecone package is not available."
+
+elif not PINECONE_API_KEY:
+    pinecone_init_error = "PINECONE_API_KEY is missing."
+
+else:
     try:
-        pc = Pinecone(api\_key=PINECONE\_API\_KEY)
-        index = pc.Index(PINECONE\_INDEX\_NAME)
+        print(
+            f"Connecting to Pinecone index: "
+            f"{PINECONE_INDEX_NAME}"
+        )
+
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+
+        # Verify that the named index actually exists.
+        index_info = pc.describe_index(
+            PINECONE_INDEX_NAME
+        )
+
+        pinecone_dimension = getattr(
+            index_info,
+            "dimension",
+            None,
+        )
+
+        index = pc.Index(PINECONE_INDEX_NAME)
+
+        # Verify the index is reachable.
+        stats = index.describe_index_stats()
+
+        pinecone_record_count = getattr(
+            stats,
+            "total_vector_count",
+            None,
+        )
+
+        if pinecone_record_count is None and isinstance(stats, dict):
+            pinecone_record_count = stats.get(
+                "total_vector_count"
+            )
+
+        print(
+            f"Pinecone connected: "
+            f"{PINECONE_INDEX_NAME}"
+        )
+        print(
+            f"Pinecone dimension: "
+            f"{pinecone_dimension}"
+        )
+        print(
+            f"Pinecone records: "
+            f"{pinecone_record_count}"
+        )
+
     except Exception as e:
-        print(f"⚠️ Pinecone initialization error: {e}")
+        pinecone_init_error = str(e)
+        pc = None
+        index = None
+
+        print(
+            f"Pinecone initialization error: {e}"
+        )
 
 
-\# ==========================================
-\# SCHEMAS & HELPERS
-\# ==========================================
+# ==========================================
+# SCHEMAS
+# ==========================================
+
 class QueryRequest(BaseModel):
     query: str
 
 
-def get\_client\_ip(request: Request) -> str:
-    x\_forwarded\_for = request.headers.get("x-forwarded-for")
-    if x\_forwarded\_for:
-        return x\_forwarded\_for.split(",")[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
+# ==========================================
+# IP / JWT HELPERS
+# ==========================================
+
+def get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get(
+        "x-forwarded-for"
+    )
+
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    return (
+        request.client.host
+        if request.client
+        else "127.0.0.1"
+    )
 
 
-def create\_jwt\_token(ip: str) -> str:
+def create_jwt_token(ip: str) -> str:
     payload = {
         "ip": ip,
         "iat": int(time.time()),
-        "exp": int(time.time()) + (24 \* 3600)
+        "exp": int(time.time()) + (24 * 3600),
     }
-    return jwt.encode(payload, JWT\_SECRET, algorithm="HS256")
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET,
+        algorithm="HS256",
+    )
 
 
-def verify\_jwt\_token(token: str) -> Optional[Dict[str, Any]]:
+def verify_jwt_token(
+    token: str,
+) -> Optional[Dict[str, Any]]:
     try:
-        return jwt.decode(token, JWT\_SECRET, algorithms=["HS256"])
+        return jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+        )
     except Exception:
         return None
 
 
-\# ==========================================
-\# SAFE RATE LIMITING LOGIC
-\# ==========================================
-MAX\_QUERIES\_PER\_DAY = 20
+# ==========================================
+# EMBEDDING GENERATION
+#
+# Uses the same model referenced by the
+# ingestion pipeline:
+# sentence-transformers/all-MiniLM-L6-v2
+#
+# Expected dimension: 384.
+# ==========================================
 
-async def check\_rate\_limit\_async(client\_ip: str) -> tuple[bool, int]:
-    if not UPSTASH\_REDIS\_REST\_URL or not UPSTASH\_REDIS\_REST\_TOKEN:
-        return True, MAX\_QUERIES\_PER\_DAY
+async def get_embedding(
+    text: str,
+) -> list[float]:
 
-    key = f"rate\_limit:{client\_ip}:{time.strftime('%Y-%m-%d')}"
-    headers = {"Authorization": f"Bearer {UPSTASH\_REDIS\_REST\_TOKEN}"}
-   &#x20;
+    text = (text or "").strip()
+
+    if not text:
+        raise ValueError(
+            "Cannot embed an empty query."
+        )
+
+    url = (
+        "https://api-inference.huggingface.co/"
+        "pipeline/feature-extraction/"
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    headers = {}
+
+    if HF_API_TOKEN:
+        headers["Authorization"] = (
+            f"Bearer {HF_API_TOKEN}"
+        )
+
+    async with httpx.AsyncClient(
+        timeout=20.0
+    ) as client:
+
+        response = await client.post(
+            url,
+            headers=headers,
+            json={
+                "inputs": text,
+                "options": {
+                    "wait_for_model": True
+                },
+            },
+        )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            "Unexpected Hugging Face embedding response."
+        )
+
+    vector = (
+        data[0]
+        if isinstance(data[0], list)
+        else data
+    )
+
+    vector = [
+        float(value)
+        for value in vector
+    ]
+
+    if len(vector) != 384:
+        raise ValueError(
+            "Embedding dimension mismatch: "
+            f"expected 384, got {len(vector)}."
+        )
+
+    # If Pinecone reported a dimension, verify it.
+    if (
+        pinecone_dimension is not None
+        and int(pinecone_dimension) != len(vector)
+    ):
+        raise ValueError(
+            "Pinecone/embedding dimension mismatch: "
+            f"Pinecone={pinecone_dimension}, "
+            f"embedding={len(vector)}."
+        )
+
+    return vector
+
+
+# ==========================================
+# RATE LIMITING
+# ==========================================
+
+MAX_QUERIES_PER_DAY = 20
+
+
+async def check_rate_limit_async(
+    client_ip: str,
+) -> tuple[bool, int]:
+
+    if (
+        not UPSTASH_REDIS_REST_URL
+        or not UPSTASH_REDIS_REST_TOKEN
+    ):
+        return True, MAX_QUERIES_PER_DAY
+
+    key = (
+        f"rate_limit:"
+        f"{client_ip}:"
+        f"{time.strftime('%Y-%m-%d')}"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {UPSTASH_REDIS_REST_TOKEN}"
+    }
+
     try:
-        async with httpx.AsyncClient(timeout=2.5) as http\_client:
-            inc\_res = await http\_client.post(f"{UPSTASH\_REDIS\_REST\_URL}/incr/{key}", headers=headers)
-            res\_data = inc\_res.json()
-           &#x20;
-            raw\_result = res\_data.get("result") if isinstance(res\_data, dict) else None
-            current\_count = int(raw\_result) if raw\_result is not None and str(raw\_result).isdigit() else 1
-           &#x20;
-            if current\_count == 1:
-                await http\_client.post(f"{UPSTASH\_REDIS\_REST\_URL}/expire/{key}/86400", headers=headers)
-               &#x20;
-            remaining = max(0, MAX\_QUERIES\_PER\_DAY - current\_count)
-            if current\_count > MAX\_QUERIES\_PER\_DAY:
+        async with httpx.AsyncClient(
+            timeout=2.5
+        ) as client:
+
+            inc_res = await client.post(
+                f"{UPSTASH_REDIS_REST_URL}/incr/{key}",
+                headers=headers,
+            )
+
+            res_data = inc_res.json()
+
+            raw_result = (
+                res_data.get("result")
+                if isinstance(
+                    res_data,
+                    dict,
+                )
+                else None
+            )
+
+            try:
+                current_count = int(raw_result)
+            except (TypeError, ValueError):
+                current_count = 1
+
+            if current_count == 1:
+                await client.post(
+                    f"{UPSTASH_REDIS_REST_URL}"
+                    f"/expire/{key}/86400",
+                    headers=headers,
+                )
+
+            remaining = max(
+                0,
+                MAX_QUERIES_PER_DAY
+                - current_count,
+            )
+
+            if current_count > MAX_QUERIES_PER_DAY:
                 return False, 0
+
             return True, remaining
+
     except Exception as err:
-        print(f"⚠️ Rate limit warning: {err}")
-        return True, MAX\_QUERIES\_PER\_DAY
+        print(
+            f"WARNING: Rate limit error: {err}"
+        )
+
+        # Fail open so a Redis outage does not
+        # take the API completely offline.
+        return True, MAX_QUERIES_PER_DAY
 
 
-\# ==========================================
-\# API ENDPOINTS
-\# ==========================================
+# ==========================================
+# HEALTH ENDPOINT
+# ==========================================
 
 @app.get("/")
 @app.get("/health")
 @app.get("/api/health")
-def health\_check():
+def health_check():
+
+    connected = False
+    error = pinecone_init_error
+    record_count = pinecone_record_count
+
+    if index is not None:
+        try:
+            stats = index.describe_index_stats()
+
+            connected = True
+            error = None
+
+            record_count = getattr(
+                stats,
+                "total_vector_count",
+                None,
+            )
+
+            if record_count is None and isinstance(
+                stats,
+                dict,
+            ):
+                record_count = stats.get(
+                    "total_vector_count"
+                )
+
+        except Exception as e:
+            connected = False
+            error = str(e)
+
     return {
         "status": "healthy",
-        "pinecone\_connected": index is not None,
-        "valid\_groq\_keys\_count": len(VALID\_GROQ\_KEYS)
+        "pinecone_connected": connected,
+        "pinecone_index": PINECONE_INDEX_NAME,
+        "pinecone_namespace": PINECONE_NAMESPACE,
+        "pinecone_dimension": pinecone_dimension,
+        "pinecone_record_count": record_count,
+        "pinecone_error": error,
+        "valid_groq_keys_count": len(
+            VALID_GROQ_KEYS
+        ),
     }
 
 
+# ==========================================
+# AUTH TOKEN
+# ==========================================
+
 @app.get("/auth/token")
 @app.get("/api/auth/token")
-def get\_auth\_token(request: Request):
-    client\_ip = get\_client\_ip(request)
-    token = create\_jwt\_token(client\_ip)
-    return {"token": token, "ip": client\_ip}
+def get_auth_token(
+    request: Request,
+):
+    client_ip = get_client_ip(request)
 
+    token = create_jwt_token(client_ip)
+
+    return {
+        "token": token,
+        "ip": client_ip,
+    }
+
+
+# ==========================================
+# QUERY STREAM
+# ==========================================
 
 @app.post("/query/stream")
 @app.post("/api/query/stream")
-async def query\_stream(
+async def query_stream(
     req: QueryRequest,
     request: Request,
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
 ):
+
     try:
-        user\_query = req.query.strip() if req and req.query else ""
-        if not user\_query:
-            raise HTTPException(status\_code=400, detail="Query string cannot be empty.")
+        user_query = (
+            req.query.strip()
+            if req and req.query
+            else ""
+        )
 
-        client\_ip = get\_client\_ip(request)
-        if authorization and authorization.startswith("Bearer "):
-            token = authorization.split(" ")[1]
-            decoded = verify\_jwt\_token(token)
-            if decoded and "ip" in decoded:
-                client\_ip = decoded["ip"]
-
-        allowed, remaining = await check\_rate\_limit\_async(client\_ip)
-        if not allowed:
+        if not user_query:
             raise HTTPException(
-                status\_code=429,
-                detail=f"Rate limit exceeded. Maximum {MAX\_QUERIES\_PER\_DAY} queries allowed per day."
+                status_code=400,
+                detail="Query string cannot be empty.",
             )
 
-        async def event\_generator() -> AsyncGenerator[str, None]:
-            yield f"data: {json.dumps({'status': f'Searching database... | {remaining}/{MAX\_QUERIES\_PER\_DAY} queries remaining'})}\n\n"
+        client_ip = get_client_ip(request)
+
+        if (
+            authorization
+            and authorization.startswith("Bearer ")
+        ):
+            token = authorization.split(
+                " ",
+                1,
+            )[1]
+
+            decoded = verify_jwt_token(
+                token
+            )
+
+            if (
+                decoded
+                and "ip" in decoded
+            ):
+                client_ip = decoded["ip"]
+
+        allowed, remaining = (
+            await check_rate_limit_async(
+                client_ip
+            )
+        )
+
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Rate limit exceeded. "
+                    f"Maximum "
+                    f"{MAX_QUERIES_PER_DAY} "
+                    "queries allowed per day."
+                ),
+            )
+
+        async def event_generator(
+        ) -> AsyncGenerator[str, None]:
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "status": (
+                        "Searching database... | "
+                        f"{remaining}/"
+                        f"{MAX_QUERIES_PER_DAY} "
+                        "queries remaining"
+                    )
+                })
+                + "\n\n"
+            )
+
             await asyncio.sleep(0.01)
 
-            candidate\_docs = []
+            candidate_docs = []
 
-            \# Safe Pinecone Query
-            if index and PINECONE\_API\_KEY:
+            # ======================================
+            # PINECONE SEMANTIC SEARCH
+            # ======================================
+
+            if (
+                index is not None
+                and PINECONE_API_KEY
+            ):
                 try:
-                    loop = asyncio.get\_event\_loop()
-                    query\_res = await loop.run\_in\_executor(
-                        None,&#x20;
-                        lambda: index.query(vector=[0.0] \* 1536, top\_k=3, include\_metadata=True)
+                    print(
+                        "Generating query embedding..."
                     )
-                    for match in query\_res.get("matches", []):
-                        if "metadata" in match and "text" in match["metadata"]:
-                            candidate\_docs.append({"text": match["metadata"]["text"]})
-                except Exception as vector\_err:
-                    print(f"⚠️ Vector search warning: {vector\_err}")
 
-            contexts = [doc["text"] for doc in candidate\_docs[:3]] if candidate\_docs else []
+                    query_vector = (
+                        await get_embedding(
+                            user_query
+                        )
+                    )
 
-            yield f"data: {json.dumps({'status': 'Generating legal analysis...'})}\n\n"
+                    print(
+                        "Query embedding dimension: "
+                        f"{len(query_vector)}"
+                    )
 
-            selected\_groq\_key = random.choice(VALID\_GROQ\_KEYS) if VALID\_GROQ\_KEYS else None
+                    loop = (
+                        asyncio.get_running_loop()
+                    )
 
-            if not selected\_groq\_key:
-                fallback\_text = (
-                    f"### Query: {user\_query}\n\n"
-                    "\*\*Configuration Required:\*\* \`GROQ\_API\_KEY\` is not set in Environment Variables.\n\n"
-                    "Please add \`GROQ\_API\_KEY\` in your Render dashboard environment settings."
+                    query_res = (
+                        await loop.run_in_executor(
+                            None,
+                            lambda: index.query(
+                                vector=query_vector,
+                                top_k=5,
+                                include_metadata=True,
+                                namespace=(
+                                    PINECONE_NAMESPACE
+                                ),
+                            ),
+                        )
+                    )
+
+                    if hasattr(
+                        query_res,
+                        "matches",
+                    ):
+                        matches = (
+                            query_res.matches
+                        )
+                    elif isinstance(
+                        query_res,
+                        dict,
+                    ):
+                        matches = (
+                            query_res.get(
+                                "matches",
+                                [],
+                            )
+                        )
+                    else:
+                        matches = []
+
+                    print(
+                        "Pinecone matches: "
+                        f"{len(matches)}"
+                    )
+
+                    for match in matches:
+
+                        if hasattr(
+                            match,
+                            "metadata",
+                        ):
+                            metadata = match.metadata
+                        elif isinstance(
+                            match,
+                            dict,
+                        ):
+                            metadata = match.get(
+                                "metadata"
+                            )
+                        else:
+                            metadata = None
+
+                        if (
+                            isinstance(
+                                metadata,
+                                dict,
+                            )
+                            and metadata.get("text")
+                        ):
+                            candidate_docs.append({
+                                "text": metadata["text"]
+                            })
+
+                except Exception as vector_err:
+                    print(
+                        "WARNING: Pinecone search failed: "
+                        f"{vector_err}"
+                    )
+
+            else:
+                print(
+                    "WARNING: Pinecone is unavailable."
                 )
-                yield f"data: {json.dumps({'chunk': fallback\_text})}\n\n"
+
+            # ======================================
+            # CONTEXT
+            # ======================================
+
+            contexts = [
+                doc["text"]
+                for doc in candidate_docs[:5]
+            ]
+
+            if contexts:
+                context_str = "\n\n".join(
+                    contexts
+                )
+            else:
+                context_str = (
+                    "No relevant statutory provisions "
+                    "were retrieved from the vector index."
+                )
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "status": (
+                        f"Retrieved {len(contexts)} "
+                        "legal documents. "
+                        "Generating legal analysis..."
+                    )
+                })
+                + "\n\n"
+            )
+
+            # ======================================
+            # GROQ
+            # ======================================
+
+            selected_groq_key = (
+                random.choice(
+                    VALID_GROQ_KEYS
+                )
+                if VALID_GROQ_KEYS
+                else None
+            )
+
+            if not selected_groq_key:
+                fallback_text = (
+                    f"### Query: {user_query}\n\n"
+                    "**Configuration Required:** "
+                    "`GROQ_API_KEY` is not set in "
+                    "Environment Variables.\n\n"
+                    "Please add `GROQ_API_KEY` in "
+                    "your Render dashboard."
+                )
+
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "chunk": fallback_text
+                    })
+                    + "\n\n"
+                )
+
                 yield "data: [DONE]\n\n"
                 return
 
-            system\_prompt = (
-                "You are an expert legal assistant specializing in the Bharatiya Nyaya Sanhita (BNS), 2023. "
-                "Provide precise, structured, and legally accurate answers based on statutory provisions. "
-                "Cite relevant BNS section numbers where applicable."
+            system_prompt = (
+                "You are an expert legal assistant "
+                "specializing in the Bharatiya Nyaya "
+                "Sanhita (BNS), 2023. "
+                "Provide precise, structured, and "
+                "legally accurate answers based on "
+                "the retrieved statutory context. "
+                "Cite relevant BNS section numbers "
+                "where applicable. "
+                "Do not invent statutory sections, "
+                "penalties, or facts. "
+                "If the retrieved context is "
+                "insufficient, clearly say so."
             )
-            context\_str = "\n\n".join(contexts) if contexts else "No relevant statutory provisions retrieved from vector index."
-            full\_user\_prompt = f"Context:\n{context\_str}\n\nUser Legal Query: {user\_query}"
+
+            full_user_prompt = (
+                f"Retrieved legal context:\n"
+                f"{context_str}\n\n"
+                f"User Legal Query:\n"
+                f"{user_query}"
+            )
 
             try:
                 headers = {
-                    "Authorization": f"Bearer {selected\_groq\_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": system\_prompt},
-                        {"role": "user", "content": full\_user\_prompt}
-                    ],
-                    "stream": True,
-                    "temperature": 0.2
+                    "Authorization":
+                        f"Bearer {selected_groq_key}",
+                    "Content-Type":
+                        "application/json",
                 }
 
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                payload = {
+                    "model":
+                        "llama-3.3-70b-versatile",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": full_user_prompt,
+                        },
+                    ],
+                    "stream": True,
+                    "temperature": 0.2,
+                }
+
+                async with httpx.AsyncClient(
+                    timeout=30.0
+                ) as client:
+
                     async with client.stream(
                         "POST",
-                        "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+                        "https://api.groq.com/"
+                        "openai/v1/chat/completions",
                         headers=headers,
-                        json=payload
+                        json=payload,
                     ) as response:
-                        if response.status\_code != 200:
-                            err\_body = await response.aread()
-                            yield f"data: {json.dumps({'chunk': f'Groq API Error ({response.status\_code}): {err\_body.decode()}'})}\n\n"
+
+                        if response.status_code != 200:
+
+                            err_body = (
+                                await response.aread()
+                            )
+
+                            error_text = (
+                                err_body.decode(
+                                    errors="replace"
+                                )
+                            )
+
+                            yield (
+                                "data: "
+                                + json.dumps({
+                                    "chunk": (
+                                        "Groq API Error "
+                                        f"({response.status_code}): "
+                                        f"{error_text}"
+                                    )
+                                })
+                                + "\n\n"
+                            )
+
                             yield "data: [DONE]\n\n"
                             return
 
-                        async for line in response.aiter\_lines():
-                            if line.startswith("data: "):
-                                data\_str = line[6:].strip()
-                                if data\_str == "[DONE]":
-                                    break
-                                try:
-                                    data\_json = json.loads(data\_str)
-                                    delta = data\_json["choices"][0]["delta"].get("content", "")
-                                    if delta:
-                                        yield f"data: {json.dumps({'chunk': delta})}\n\n"
-                                except Exception:
+                        async for line in (
+                            response.aiter_lines()
+                        ):
+
+                            if not line.startswith(
+                                "data: "
+                            ):
+                                continue
+
+                            data_str = (
+                                line[6:].strip()
+                            )
+
+                            if data_str == "[DONE]":
+                                break
+
+                            try:
+                                data_json = json.loads(
+                                    data_str
+                                )
+
+                                choices = data_json.get(
+                                    "choices",
+                                    [],
+                                )
+
+                                if not choices:
                                     continue
 
-                yield f"data: {json.dumps({'status': f'Completed | {remaining}/{MAX\_QUERIES\_PER\_DAY} queries remaining'})}\n\n"
+                                delta = (
+                                    choices[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+
+                                if delta:
+                                    yield (
+                                        "data: "
+                                        + json.dumps({
+                                            "chunk": delta
+                                        })
+                                        + "\n\n"
+                                    )
+
+                            except Exception:
+                                continue
+
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "status": (
+                            "Completed | "
+                            f"{remaining}/"
+                            f"{MAX_QUERIES_PER_DAY} "
+                            "queries remaining"
+                        )
+                    })
+                    + "\n\n"
+                )
+
                 yield "data: [DONE]\n\n"
 
-            except Exception as groq\_err:
-                yield f"data: {json.dumps({'chunk': f'Streaming exception: {str(groq\_err)}'})}\n\n"
+            except Exception as groq_err:
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "chunk": (
+                            "Streaming exception: "
+                            f"{str(groq_err)}"
+                        )
+                    })
+                    + "\n\n"
+                )
+
                 yield "data: [DONE]\n\n"
 
         return StreamingResponse(
-            event\_generator(),
-            media\_type="text/event-stream",
+            event_generator(),
+            media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
+                "X-Accel-Buffering": "no",
+            },
         )
 
-    except HTTPException as http\_ex:
-        raise http\_ex
-    except Exception as top\_ex:
-        raise HTTPException(status\_code=500, detail=f"Internal Server Error: {str(top\_ex)}")
+    except HTTPException as http_ex:
+        raise http_ex
+
+    except Exception as top_ex:
+        print(
+            f"Query endpoint error: {top_ex}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Internal Server Error: "
+                f"{str(top_ex)}"
+            ),
+        )
 
 
-@app.api\_route("/{path\_name\:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def catch\_all(request: Request, path\_name: str):
+# ==========================================
+# CATCH-ALL
+# ==========================================
+
+@app.api_route(
+    "/{path_name:path}",
+    methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+    ],
+)
+async def catch_all(
+    request: Request,
+    path_name: str,
+):
     return JSONResponse(
-        status\_code=404,
-        content={"error": "Route not found", "requested\_path": path\_name}
+        status_code=404,
+        content={
+            "error": "Route not found",
+            "requested_path": path_name,
+        },
     )
+'''
+
+path = Path("/mnt/data/api_index_updated.py")
+path.write_text(code, encoding="utf-8")
+print(f"Created: {path}")
+print(f"Lines: {len(code.splitlines())}")
