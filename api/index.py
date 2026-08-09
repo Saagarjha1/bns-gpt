@@ -50,7 +50,7 @@ GROQ_KEYS = [
 VALID_GROQ_KEYS = [k for k in GROQ_KEYS if k and k.strip()]
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "bns-legal")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "bns-legal-index")
 JWT_SECRET = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY") or "super-secret-bns-key"
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
