@@ -76,7 +76,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 PINECONE_INDEX_NAME = os.getenv(
     "PINECONE_INDEX_NAME",
-    "bns-legal-index"
+    "bns-legal-index-v2"
 )
 
 JWT_SECRET = (
